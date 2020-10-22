@@ -2,7 +2,7 @@ c
 c -------------------------------------------------------------
 c
       subroutine stepgrid(q,fm,fp,gm,gp,mitot,mjtot,mbc,dt,dtnew,dx,dy,
-     &                  nvar,xlow,ylow,time,mptr,maux,aux)
+     &                  nvar,xlow,ylow,time,mptr,maux,aux,actualstep)
 c
 c
 c ::::::::::::::::::: STEPGRID ::::::::::::::::::::::::::::::::::::
@@ -34,8 +34,6 @@ c :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
       external rpn2,rpt2
 
 
-c      parameter (msize=max1d+4)
-c      parameter (mwork=msize*(maxvar*maxvar + 13*maxvar + 3*maxaux +2))
 
       dimension q(nvar,mitot,mjtot)
       dimension fp(nvar,mitot,mjtot),gp(nvar,mitot,mjtot)
@@ -45,6 +43,7 @@ c      dimension work(mwork)
 
       logical :: debug = .false.
       logical :: dump = .false.
+      logical, intent (in) :: actualstep
 c
       tcfmax = -rinfinity
       level = node(nestlevel,mptr)
@@ -153,7 +152,7 @@ c               # test if arrival times should be output
 c::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
        call b4step2(mbc,mx,my,nvar,q,
-     &             xlowmbc,ylowmbc,dx,dy,time,dt,maux,aux)
+     &             xlowmbc,ylowmbc,dx,dy,time,dt,maux,aux,actualstep)
       
 c::::::::::::::::::::::::FIXED GRID DATA before step:::::::::::::::::::::::
 c     # fill in values at fixed grid points effected at time tc0

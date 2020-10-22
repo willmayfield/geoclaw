@@ -12,7 +12,8 @@
 !
 ! :::::::::::::::::::::::::::::::::::::::;:::::::::::::::::::::::;
 recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
-                              nrowst,ncolst,ilo,ihi,jlo,jhi,patchOnly,msrc)
+                              nrowst,ncolst,ilo,ihi,jlo,jhi,patchOnly,msrc,  &
+                              do_aux_copy)
 
     use amr_module, only: nghost, xlower, ylower, xupper, yupper, outunit
     use amr_module, only: xperdom, yperdom, spheredom, hxposs, hyposs
@@ -21,6 +22,11 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
 
     use geoclaw_module, only: sea_level, dry_tolerance
     use topo_module, only: topo_finalized
+    use qinit_module, only: variable_eta_init
+    use qinit_module, only: force_dry,use_force_dry,mx_fdry, my_fdry
+    use qinit_module, only: xlow_fdry, ylow_fdry, xhi_fdry, yhi_fdry
+    use qinit_module, only: dx_fdry, dy_fdry
+    use qinit_module, only: tend_force_dry
 
     implicit none
 
@@ -28,7 +34,7 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
     integer, intent(in) :: level, nvar, naux, mx, my, nrowst, ncolst
     integer, intent(in) :: ilo,ihi,jlo,jhi,msrc
     real(kind=8), intent(in) :: t
-    logical  :: patchOnly
+    logical  :: patchOnly, do_aux_copy, yes_do_aux_copy
 
     ! Output
     real(kind=8), intent(in out) :: valbig(nvar,mx,my)
@@ -52,6 +58,9 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
     integer(kind=1) :: flaguse(ihi-ilo+1, jhi-jlo+1)
 
     real(kind=8) :: eta1old, eta2old
+    real(kind=8) :: veta_init_c
+    real(kind=8) :: x,y
+    integer :: ii,jj
 
     ! Scratch arrays for interpolation
     logical :: fine_flag(nvar, ihi-ilo+2,jhi-jlo + 2)
@@ -68,6 +77,8 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
     integer ::   fine_cell_count(ihi-ilo+3, jhi-jlo + 3)
 
     integer :: nghost_patch, lencrse
+    logical :: use_force_dry_this_level
+    real(kind=8) :: ddxy
 
     ! Stack storage
     !  use stack-based scratch arrays instead of alloc, since dont really
@@ -80,24 +91,39 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
     ! the +2 is to expand on coarse grid to enclose fine
     real(kind=8) :: valcrse((ihi-ilo+3) * (jhi-jlo+3) * nvar)   ! NB this is a 1D array 
     real(kind=8) :: auxcrse((ihi-ilo+3) * (jhi-jlo+3) * naux)  
+    real(kind=8) :: vetac((ihi-ilo+3) * (jhi-jlo+3))
  
+    yes_do_aux_copy = .true.
 
     mx_patch = ihi-ilo + 1 ! nrowp
     my_patch = jhi-jlo + 1 
 
     dx_fine     = hxposs(level)
     dy_fine     = hyposs(level)
+    
+    use_force_dry_this_level = use_force_dry
+    if (use_force_dry) then
+        ! check if force_dry resolution the same as this level:
+        ddxy = max(abs(dx_fine-dx_fdry), abs(dy_fine-dy_fdry))
+        use_force_dry_this_level = (ddxy < 0.01d0*min(dx_fdry,dy_fdry))
+        endif
 
+    !if (use_force_dry_this_level .and. (t <= tend_force_dry)) then
+    !    write(6,*) '+++ using force_dry in filval, t = ',t
+    !    endif
+            
     ! Coordinates of edges of patch (xlp,xrp,ybp,ytp)
     xlow_fine = xlower + ilo * dx_fine
     ylow_fine = ylower + jlo * dy_fine
+    xhi_fine = xlower + (ihi + 1) * dx_fine
+    yhi_fine = ylower + (jhi + 1) * dy_fine
 
     ! Fill in the patch as much as possible using values at this level
     ! note that if only a patch, msrc = -1, otherwise a real grid and intfil
     ! uses its boundary list
     ! msrc either -1 (for a patch) or the real grid number
-    call intfil(valbig,mx,my,t,flaguse,nrowst,ncolst, ilo,  &
-                ihi,jlo,jhi,level,nvar,naux,msrc)
+    call intfil(valbig,aux,mx,my,t,flaguse,nrowst,ncolst, ilo,  &
+                ihi,jlo,jhi,level,nvar,naux,msrc,do_aux_copy)
 
     ! Trimbd returns set = true if all of the entries are filled (=1.).
     ! set = false, otherwise. If set = true, then no other levels are
@@ -178,32 +204,42 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
         
         if (naux > 0) then
             nghost_patch = 0
+            lencrse = (ihi-ilo+3)*(jhi-jlo+3)*naux ! set 1 component, not all naux
+            ! new system checks initialization before setting aux vals
+            ! set here and check later if not all set by copying in intfil
+            ! after some more testing shoudl move thiese auxcrse initialization
+            ! into the branches that need it (topo_finalized dand periodic
+            ! but out of the most used filrecur pathway
+            do k = 1, lencrse, naux
+              auxcrse(k) = NEEDS_TO_BE_SET  
+            end do
   
             ! update topography if needed
             !if ((num_dtopo>0).and.(topo_finalized.eqv..false.)) then
             !   if ((minval(topotime)<maxval(tfdtopo)).and.(t>=minval(t0dtopo))) then
             if (.not. topo_finalized) then
                 call topo_update(t)
-                endif
-
-            nghost_patch = 0                           
-            lencrse = (ihi-ilo+3)*(jhi-jlo+3)*naux ! set 1 component, not all naux
-            do k = 1, lencrse, naux
-              auxcrse(k) = NEEDS_TO_BE_SET  ! new system checks initialization before setting aux vals
-            end do
-            call setaux(nghost_patch, mx_coarse, my_coarse,       &
-                        xlow_coarse, ylow_coarse,                 &
-                        dx_coarse,dy_coarse,naux,auxcrse)
+                call setaux(nghost_patch, mx_coarse, my_coarse,       &
+                            xlow_coarse, ylow_coarse,                 &
+                            dx_coarse,dy_coarse,naux,auxcrse)
+                yes_do_aux_copy = .false. !grids may not have latest topo
+            endif
         endif
 
         ! Fill in the edges of the coarse grid
         if ((xperdom .or. (yperdom .or. spheredom)) .and. sticksout(iplo,iphi,jplo,jphi)) then
+            call setaux(nghost_patch, mx_coarse, my_coarse,       &
+                        xlow_coarse, ylow_coarse,                 &
+                        dx_coarse,dy_coarse,naux,auxcrse)
             call prefilrecur(level-1,nvar,valcrse,auxcrse,naux,t, &
                              mx_coarse,my_coarse,1,1,iplo,iphi,jplo,jphi,iplo,iphi,jplo,jphi,.true.)
         else ! when going to coarser patch, no source grid (for now at least) hence -1
             call filrecur(level-1,nvar,valcrse,auxcrse,naux,t,  &
-                          mx_coarse,my_coarse,1,1,iplo,iphi,jplo,jphi,.true.,-1)
-
+                          mx_coarse,my_coarse,1,1,iplo,iphi,jplo,jphi,.true.,-1,    &
+                          yes_do_aux_copy)
+            !call setaux(nghost_patch, mx_coarse, my_coarse,       &
+            !            xlow_coarse, ylow_coarse,                 &
+            !            dx_coarse,dy_coarse,naux,auxcrse)
         endif
 
         ! loop through coarse cells determining intepolation slopes
@@ -216,14 +252,22 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
         fine_mass = 0.d0
         slope = 0.d0
 
+        if (variable_eta_init) then
+            call set_eta_init(nghost_patch, mx_coarse, my_coarse,  &
+                 xlow_coarse, ylow_coarse,dx_coarse,dy_coarse,t,vetac)
+          endif
+          
         ! Calculate surface elevation eta using dry limiting
+        veta_init_c = sea_level  ! if not variable_eta_init
         do j_coarse = 1, my_coarse
             do i_coarse = 1, mx_coarse
                 h = valcrse(ivalc(1,i_coarse,j_coarse))
                 b = auxcrse(iauxc(i_coarse,j_coarse))
 
                 if (h < dry_tolerance) then
-                    eta_coarse(i_coarse,j_coarse) = sea_level
+                    if (variable_eta_init) &
+                        veta_init_c = vetac(ivetac(i_coarse,j_coarse))
+                    eta_coarse(i_coarse,j_coarse) = veta_init_c
                 else
                     eta_coarse(i_coarse,j_coarse) = h + b
                 endif
@@ -247,7 +291,7 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
                 up_slope = eta_coarse(i_coarse,j_coarse+1) - eta_coarse(i_coarse,j_coarse)
                 if (up_slope * down_slope > 0.d0) then
                     slope(2,i_coarse,j_coarse) = min(abs(up_slope), abs(down_slope)) &
-                        * sign(1.d0,eta_coarse(i_coarse+1,j_coarse) - eta_coarse(i_coarse-1,j_coarse))
+                        * sign(1.d0,eta_coarse(i_coarse,j_coarse+1) - eta_coarse(i_coarse,j_coarse-1))
                 endif
             enddo
         enddo
@@ -255,7 +299,7 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
         ratio_y = real(refinement_ratio_y,kind=8)  ! needs to be real for "floor" call below
         ratio_x = real(refinement_ratio_x,kind=8)
         ! Loop through patch to be filled, includes multiple coarse cells
-         do j_fine = 1, my_patch
+        do j_fine = 1, my_patch
             j_coarse     = floor((j_fine + jlo - 1) / ratio_y) - jplo + 1
             ycent_coarse = ylow_coarse + (j_coarse-.5d0)*dy_coarse
             ycent_fine   = ylower + (j_fine-1+jlo + .5d0)*dy_fine
@@ -282,6 +326,35 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
                     eta_fine = eta_coarse(i_coarse,j_coarse) + eta1 * slope(1,i_coarse,j_coarse) &
                                                              + eta2 * slope(2,i_coarse,j_coarse)
                     h_fine = max(eta_fine - aux(1,i_fine + nrowst - 1, j_fine + ncolst - 1), 0.d0)
+
+                    if (variable_eta_init) &
+                        veta_init_c = vetac(ivetac(i_coarse,j_coarse))
+                        ! else it has been set to the constant sea_level
+
+                    x = xlow_fine + (i_fine-0.5d0)*dx_fine
+                    y = ylow_fine + (j_fine-0.5d0)*dy_fine
+
+                    if (use_force_dry_this_level .and. &
+                            (((eta_coarse(i_coarse,j_coarse) == veta_init_c) &
+                            .and. (h_fine > 0)) &
+                            .or. (t <= tend_force_dry))) then
+                        ! check if in force_dry region
+                        ii = int((x - xlow_fdry + 1d-7) / dx_fdry) + 1
+                        jj = int((y - ylow_fdry + 1d-7) / dy_fdry) + 1
+                        jj = my_fdry - jj  ! since index 1 corresponds to north edge
+                        if ((ii>=1) .and. (ii<=mx_fdry) .and. &
+                            (jj>=1) .and. (jj<=my_fdry)) then
+                            ! grid cell lies in region covered by force_dry,
+                            ! check if this cell is forced to be dry      
+                            ! Otherwise don't change value set above:
+                            if (force_dry(ii,jj) == 1) then
+                                h_fine = 0.d0
+                                endif
+                            endif
+
+                        endif
+
+
                     valbig(1,i_fine+nrowst-1, j_fine+ncolst-1) = h_fine
                     fine_mass(i_coarse,j_coarse) = fine_mass(i_coarse,j_coarse) + h_fine
 
@@ -297,8 +370,9 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
 
         ! Momentum Interpolation
         do n = 2, nvar
-          do j_coarse = 2, my_coarse - 1
-            do i_coarse = 2, mx_coarse - 1
+            slope = 0.d0  ! reinitialize for each var
+            do j_coarse = 2, my_coarse - 1
+                do i_coarse = 2, mx_coarse - 1
 
                     ! Determine slopes for interpolation
                     down_slope = (valcrse(ivalc(n,i_coarse,j_coarse)) - valcrse(ivalc(n,i_coarse-1,j_coarse)))
@@ -422,8 +496,8 @@ recursive subroutine filrecur(level,nvar,valbig,aux,naux,t,mx,my, &
                         endif
                     enddo
                 enddo
-            endif
-        enddo
+            endif ! end if reloop
+        enddo  ! end loop over nvar
     endif   ! end if patch not set
 
     ! set bcs, whether or not recursive calls needed. set any part of patch that stuck out
@@ -448,6 +522,13 @@ contains
         integer, intent(in) :: i,j
         iauxc = 1 + naux*(i-1) + naux*mx_coarse*(j-1)
     end function iauxc
+
+    ! Index into vetac:
+    integer pure function ivetac(i,j)
+        implicit none
+        integer, intent(in) :: i,j
+        ivetac = 1 + (i-1) + mx_coarse*(j-1)
+    end function ivetac
 
     ! logical for checking if this patch sticks outside of the domain
     logical pure function sticksout(iplo,iphi,jplo,jphi)

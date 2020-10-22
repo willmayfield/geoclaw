@@ -65,9 +65,9 @@ class GeoClawData(clawpack.clawutil.data.ClawData):
         self.add_attribute('sea_level',0.0)
 
 
-    def write(self,data_source='setrun.py'):
+    def write(self,data_source='setrun.py', out_file='geoclaw.data'):
 
-        self.open_data_file('geoclaw.data',data_source)
+        self.open_data_file(out_file, data_source)
 
         self.data_write('gravity', 
                                description="(gravitational acceleration m/s^2)")
@@ -118,9 +118,9 @@ class RefinementData(clawpack.clawutil.data.ClawData):
         self.add_attribute('variable_dt_refinement_ratios',False)
 
 
-    def write(self,data_source='setrun.py'):
+    def write(self,data_source='setrun.py', out_file='refinement.data'):
         # Refinement controls
-        self.open_data_file('refinement.data',data_source)
+        self.open_data_file(out_file, data_source)
         self.data_write('wave_tolerance')
         if not isinstance(self.speed_tolerance,list):
             self.speed_tolerance = [self.speed_tolerance]
@@ -141,6 +141,7 @@ class TopographyData(clawpack.clawutil.data.ClawData):
         super(TopographyData,self).__init__()
 
         # Topography data
+        self.add_attribute('topo_missing',99999.)
         self.add_attribute('test_topography',0)
         self.add_attribute('topofiles',[])
         
@@ -159,15 +160,19 @@ class TopographyData(clawpack.clawutil.data.ClawData):
         self.add_attribute('beach_slope',0.008)
 
 
-    def write(self,data_source='setrun.py'): 
+    def write(self,data_source='setrun.py', out_file='topo.data'): 
 
-        self.open_data_file('topo.data',data_source)
+        self.open_data_file(out_file, data_source)
+        self.data_write(name='topo_missing',
+                        description='replace no_data_value in topofile')
         self.data_write(name='test_topography',description='(Type topography specification)')
         if self.test_topography == 0:
             ntopofiles = len(self.topofiles)
             self.data_write(value=ntopofiles,alt_name='ntopofiles')
             for tfile in self.topofiles:
-                fname = os.path.abspath(tfile[-1])
+                # if path is relative in setrun, assume it's relative to the
+                # same directory that out_file comes from
+                fname = os.path.abspath(os.path.join(os.path.dirname(out_file),tfile[-1]))
                 self._out_file.write("\n'%s' \n " % fname)
                 self._out_file.write("%3i %3i %3i %20.10e %20.10e \n" % tuple(tfile[:-1]))
         elif self.test_topography == 1:
@@ -199,9 +204,9 @@ class FixedGridData(clawpack.clawutil.data.ClawData):
         self.add_attribute('fixedgrids',[])
 
 
-    def write(self,data_source='setrun.py'):
+    def write(self,data_source='setrun.py', out_file='fixed_grids.data'):
         # Fixed grid settings
-        self.open_data_file('fixed_grids.data',data_source)
+        self.open_data_file(out_file, data_source)
         nfixedgrids = len(self.fixedgrids)
         self.data_write(value=nfixedgrids,alt_name='nfixedgrids')
         self.data_write()
@@ -218,21 +223,49 @@ class FGmaxData(clawpack.clawutil.data.ClawData):
         # File name for fgmax points and parameters:
         self.add_attribute('fgmax_files',[])
         self.add_attribute('num_fgmax_val',1)
+        self.add_attribute('fgmax_grids',[])
 
 
-    def write(self,data_source='setrun.py'):
-        self.open_data_file('fgmax.data',data_source)
+    def write(self,data_source='setrun.py', out_file='fgmax_grids.data'):
+        if len(self.fgmax_files) > 0:
+            msg = '*** fgmax_files has been deprecated, ' \
+                  + 'use fgmax_grids instead.'
+            raise ValueError(msg)
+
+        # new style:
+        self.open_data_file(out_file, data_source)
         num_fgmax_val = self.num_fgmax_val
         if num_fgmax_val not in [1,2,5]:
             raise NotImplementedError( \
                     "Expecting num_fgmax_val in [1,2,5], got %s" % num_fgmax_val)
         self.data_write(value=num_fgmax_val,alt_name='num_fgmax_val')
-        num_fgmax_grids = len(self.fgmax_files)
+        num_fgmax_grids = len(self.fgmax_grids)
         self.data_write(value=num_fgmax_grids,alt_name='num_fgmax_grids')
         self.data_write()
-        for fgmax_file in self.fgmax_files:
-            fname = os.path.abspath(fgmax_file)
-            self._out_file.write("\n'%s' \n" % fname)
+
+        fgno_unset = 0  # to use if fg.fgno not set by user
+        fgno_list = []  # to check for uniqueness of fgno's
+
+        for fg in self.fgmax_grids:
+            # if path is relative in setrun, assume it's relative to the
+            # same directory that out_file comes from
+            if fg.xy_fname is not None:
+                fg.xy_fname = os.path.abspath(os.path.join(\
+                              os.path.dirname(out_file),fg.xy_fname))
+
+            if fg.fgno is None:
+                # not set by user in setrun
+                fgno_unset += 1
+                fg.fgno = fgno_unset
+
+            if fg.fgno in fgno_list:
+                msg = 'Trying to set fgmax grid number to fgno = %i' % fg.fgno \
+                      + '\n             but this fgno was already used' \
+                      + '\n             Set unique fgno for each fgmax grid' 
+                raise ValueError(msg)
+
+            fgno_list.append(fg.fgno)
+            fg.write_to_fgmax_data(self._out_file)
         self.close_data_file()
 
 
@@ -247,15 +280,17 @@ class DTopoData(clawpack.clawutil.data.ClawData):
         self.add_attribute('dtopofiles',[])
         self.add_attribute('dt_max_dtopo', 1.e99)
 
-    def write(self,data_source='setrun.py'):
+    def write(self,data_source='setrun.py', out_file='dtopo.data'):
 
         # Moving topography settings
-        self.open_data_file('dtopo.data',data_source)
+        self.open_data_file(out_file, data_source)
         mdtopofiles = len(self.dtopofiles)
         self.data_write(value=mdtopofiles,alt_name='mdtopofiles')
         self.data_write()
         for tfile in self.dtopofiles:
-            fname = os.path.abspath(tfile[-1])
+            # if path is relative in setrun, assume it's relative to the
+            # same directory that out_file comes from
+            fname = os.path.abspath(os.path.join(os.path.dirname(out_file),tfile[-1]))
             self._out_file.write("\n'%s' \n" % fname)
             self._out_file.write("%3i %3i %3i\n" % tuple(tfile[:-1]))
         self.data_write()
@@ -303,6 +338,19 @@ class DTopoData(clawpack.clawutil.data.ClawData):
                           "the number found.")
 
 
+
+class ForceDry(clawpack.clawutil.data.ClawData):
+    
+    def __init__(self):
+        r"""
+        A single force_dry array and associated data
+        """
+        
+        super(ForceDry,self).__init__()
+        self.add_attribute('tend',None)
+        self.add_attribute('fname','')
+
+
 class QinitData(clawpack.clawutil.data.ClawData):
 
     def __init__(self):
@@ -312,10 +360,14 @@ class QinitData(clawpack.clawutil.data.ClawData):
         # Qinit data
         self.add_attribute('qinit_type',0)
         self.add_attribute('qinitfiles',[])   
+        self.add_attribute('variable_eta_init',False)   
+        self.add_attribute('force_dry_list',[])   
+        self.add_attribute('num_force_dry',0)
 
-    def write(self,data_source='setrun.py'):
+    def write(self,data_source='setrun.py', out_file='qinit.data'):
+
         # Initial perturbation
-        self.open_data_file('qinit.data',data_source)
+        self.open_data_file(out_file, data_source)
         self.data_write('qinit_type')
 
         # Perturbation requested
@@ -324,11 +376,30 @@ class QinitData(clawpack.clawutil.data.ClawData):
         else:
             # Check to see if each qinit file is present and then write the data
             for tfile in self.qinitfiles:
-                fname = "'%s'" % os.path.abspath(tfile[-1])
-                self._out_file.write("\n%s  \n" % fname)
+                # if path is relative in setrun, assume it's relative to the
+                # same directory that out_file comes from
+                fname = os.path.abspath(os.path.join(os.path.dirname(out_file),tfile[-1]))
+                self._out_file.write("\n'%s' \n" % fname)
                 self._out_file.write("%3i %3i \n" % tuple(tfile[:-1]))
         # else:
         #     raise ValueError("Invalid qinit_type parameter %s." % self.qinit_type)
+
+
+        self.data_write('variable_eta_init')
+
+        self.num_force_dry = len(self.force_dry_list)
+        self.data_write('num_force_dry')
+
+        for force_dry in self.force_dry_list:
+            
+            # if path is relative in setrun, assume it's relative to the
+            # same directory that out_file comes from
+            fname = os.path.abspath(os.path.join(os.path.dirname(out_file),\
+                    force_dry.fname))
+            self._out_file.write("\n'%s' \n" % fname)
+            self._out_file.write("%.3f \n" % force_dry.tend)
+
+    
         self.close_data_file()
 
 
@@ -341,7 +412,13 @@ class SurgeData(clawpack.clawutil.data.ClawData):
                                None: 0,
                                'holland80': 1,
                                'holland10': 2,
-                               'CLE': 3}
+                               'CLE': 3,  
+                               'SLOSH': 4,                     
+                               'rankine': 5,           
+                               'modified-rankine': 6, 
+                               'DeMaria': 7     
+                              }
+    storm_spec_not_implemented = ['CLE'] 
 
     def __init__(self):
         super(SurgeData,self).__init__()
@@ -366,7 +443,7 @@ class SurgeData(clawpack.clawutil.data.ClawData):
         self.add_attribute("storm_file", None) # File(s) containing data
 
         
-    def write(self,out_file='./surge.data',data_source="setrun.py"):
+    def write(self,out_file='surge.data',data_source="setrun.py"):
         """Write out the data file to the path given"""
 
         # print "Creating data file %s" % out_file
@@ -412,7 +489,13 @@ class SurgeData(clawpack.clawutil.data.ClawData):
         if type(self.storm_specification_type) is not int:
             if self.storm_specification_type in         \
                     self.storm_spec_dict_mapping.keys():
-                self.data_write("storm_specification_type",
+                if self.storm_specification_type in     \
+                    self.storm_spec_not_implemented: 
+                    raise NotImplementedError("%s has not been implemented." 
+                                %self.storm_specification_type) 
+                
+                else: 
+                    self.data_write("storm_specification_type",
                                 self.storm_spec_dict_mapping[
                                         self.storm_specification_type],
                                 description="(Storm specification)")
@@ -475,7 +558,10 @@ class FrictionData(clawpack.clawutil.data.ClawData):
             self.data_write(value=len(self.friction_files),
                             alt_name='num_friction_files')
             for friction_file in self.friction_files:
-                self._out_file.write("'%s' %s\n " % friction_file)
+                # if path is relative in setrun, assume it's relative to the
+                # same directory that out_file comes from
+                fname = os.path.abspath(os.path.join(os.path.dirname(out_file),friction_file))
+                self._out_file.write("'%s' %s\n " % fname)
 
         self.close_data_file()
 
@@ -505,7 +591,7 @@ class MultilayerData(clawpack.clawutil.data.ClawData):
         self.add_attribute('wave_tolerance', [1e-1, 2e-1])
         self.add_attribute('dry_limit', False)
 
-    def write(self, out_file='./multilayer.data', datasource="setrun.py"):
+    def write(self, out_file='multilayer.data', datasource="setrun.py"):
 
         self.open_data_file(out_file, datasource)
 

@@ -12,7 +12,7 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
     use amr_module, only: node, rnode, ndilo, ndihi, ndjlo, ndjhi
     use amr_module, only: cornxlo, cornylo, levelptr, mxnest
     use amr_module, only: timeValout, timeValoutCPU, tvoll, tvollCPU, rvoll
-    use amr_module, only: timeTick, tick_clock_start, t0
+    use amr_module, only: timeTick, tick_clock_start, t0, timeTickCPU
 
     use storm_module, only: storm_specification_type, output_storm_location
     use storm_module, only: output_storm_location
@@ -49,11 +49,11 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
 #endif
 
     ! Timing
-    integer :: clock_start, clock_finish, clock_rate
-    integer    tick_clock_finish, tick_clock_rate, timeTick_int
+    integer(kind=8) :: clock_start, clock_finish, clock_rate
+    integer(kind=8) ::    tick_clock_finish, tick_clock_rate, timeTick_int
     real(kind=8) :: cpu_start, cpu_finish, t_CPU_overall, timeTick_overall
     character(len=128) :: console_format
-    character(len=256) :: timing_line, timing_substr
+    character(len=512) :: timing_line, timing_substr
     character(len=*), parameter :: timing_file_name = "timing.csv"
 
     character(len=*), parameter :: header_format =                             &
@@ -194,6 +194,13 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
 
                 ! Binary output
                 case(3)
+
+                    ! Updating ghost cell data
+                    call bound(time,num_eqn,num_ghost,alloc(q_loc),     &
+                                 num_cells(1) + 2*num_ghost,            &
+                                 num_cells(2) + 2*num_ghost,            &
+                                 grid_ptr,alloc(aux_loc),num_aux)
+
                     ! Need to add eta to the output data
                     allocate(qeta((num_eqn + 1)                         &
                              * (num_cells(1) + 2 * num_ghost)           &
@@ -380,7 +387,8 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
     ! ==========================================================================
     ! Write out timing stats
     open(unit=out_unit, file=timing_file_name, form='formatted',         &
-             status='old', action='write', position='append')
+             status='unknown', action='write', position='append')
+             !status='old', action='write', position='append')
     
     timing_line = "(e16.6, ', ', e16.6, ', ', e16.6,"
     do level=1, mxnest
@@ -394,6 +402,9 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
         timeTick_overall = 0.d0
     else
         call cpu_time(t_CPU_overall)
+        ! if this is a restart, need to adjust add in time from previous run:
+        t_CPU_overall = t_CPU_overall + timeTickCPU
+
         call system_clock(tick_clock_finish,tick_clock_rate)
         timeTick_int = timeTick + tick_clock_finish - tick_clock_start
         timeTick_overall = real(timeTick_int, kind=8)/real(clock_rate,kind=8)
@@ -409,11 +420,11 @@ subroutine valout(level_begin, level_end, time, num_eqn, num_aux)
     ! Print output info
     if (display_landfall_time) then
         ! Convert time to days relative to landfall
-        console_format = "('AMRCLAW: Frame ',i4,' output files done at " // &
+        console_format = "('GEOCLAW: Frame ',i4,' output files done at " // &
                          "time t = ', f5.2,/)"
         print console_format, frame, time / (24.d0 * 60d0**2)
     else
-        console_format = "('AMRCLAW: Frame ',i4,' output files done at " // &
+        console_format = "('GEOCLAW: Frame ',i4,' output files done at " // &
                          "time t = ', d13.6,/)"
         print console_format, frame, time
     end if

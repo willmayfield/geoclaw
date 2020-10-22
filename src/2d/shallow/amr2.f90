@@ -90,6 +90,8 @@ program amr2
     use amr_module, only: rprint, sprint, tprint, uprint
 
     use amr_module, only: t0, tstart_thisrun
+    use amr_module, only: tick_clock_start, tick_cpu_start
+
 
     ! Data modules
     use geoclaw_module, only: set_geo
@@ -103,6 +105,7 @@ program amr2
     use regions_module, only: set_regions
     use fgmax_module, only: set_fgmax, FG_num_fgrids
     use multilayer_module, only: set_multilayer
+    use adjoint_module, only: read_adjoint_data
 
     implicit none
 
@@ -115,10 +118,11 @@ program amr2
     logical :: vtime, rest, output_t0    
 
     ! Timing variables
-    integer :: clock_start, clock_finish, clock_rate, ttotal
+    integer(kind=8) :: clock_start, clock_finish, clock_rate, ttotal, count_max
     real(kind=8) :: ttotalcpu
+    integer(kind=8) :: tick_clock_finish
     integer, parameter :: timing_unit = 48
-    character(len=256) :: timing_line, timing_substr
+    character(len=512) :: timing_line, timing_substr
     character(len=*), parameter :: timing_base_name = "timing."
     character(len=*), parameter :: timing_header_format =                      &
                                                   "(' wall time (', i2,')," // &
@@ -306,11 +310,11 @@ program amr2
     read(inunit,*) rstfile
 
     read(inunit,*) checkpt_style
-    if (checkpt_style == 0) then
-        ! Never checkpoint:
-        checkpt_interval = iinfinity
 
-    else if (abs(checkpt_style) == 2) then
+    ! default value unless set by checkpt_style==3:
+    checkpt_interval = iinfinity
+
+    if (abs(checkpt_style) == 2) then
         read(inunit,*) nchkpt
         allocate(tchk(nchkpt))
         read(inunit,*) (tchk(i), i=1,nchkpt)
@@ -325,6 +329,8 @@ program amr2
     ! ==========================================================================
     !  Refinement Control
     call opendatafile(inunit, amrfile)
+
+    read(inunit,*) max1d  ! max size of each grid patch
 
     read(inunit,*) mxnest
     if (mxnest <= 0) then
@@ -458,28 +464,38 @@ program amr2
 
         ! moved upt before restrt or won't properly initialize 
         call set_fgmax()   
+        
+        ! need these before set_gauges so num_out_vars set right for gauges
+        call set_geo()                    ! sets basic parameters g and coord system
+        call set_multilayer()             ! Set multilayer SWE parameters
+        
+        ! Set gauge output, note that restrt might reset x,y for lagrangian:
+        call set_gauges(rest, nvar, naux) 
+
         call restrt(nsteps,time,nvar,naux)
+
         nstart  = nsteps
         tstart_thisrun = time
         print *, ' '
         print *, 'Restarting from previous run'
         print *, '   at time = ',time
         print *, ' '
+
         ! Call user routine to set up problem parameters:
         call setprob()
 
         ! Non-user defined setup routine
-        call set_geo()                    ! sets basic parameters g and coord system
+        !call set_geo()                    ! sets basic parameters g and coord system
         call set_refinement()             ! sets refinement control parameters
         call read_dtopo_settings()        ! specifies file with dtopo from earthquake
         call read_topo_settings()         ! specifies topography (bathymetry) files
         call set_qinit()                  ! specifies file with dh if this used instead
         call set_fixed_grids()            ! Fixed grid settings
         call setup_variable_friction()    ! Variable friction parameter
-        call set_multilayer()             ! Set multilayer SWE parameters
+        !call set_multilayer()             ! Set multilayer SWE parameters
         call set_storm()                  ! Set storm parameters
         call set_regions()                ! Set refinement regions
-        call set_gauges(rest, nvar, naux) ! Set gauge output
+        call read_adjoint_data()          ! Read adjoint solution
 
     else
 
@@ -516,6 +532,7 @@ program amr2
         call set_regions()                ! Set refinement regions
         call set_gauges(rest, nvar, naux) ! Set gauge output
         call set_fgmax()
+        call read_adjoint_data()          ! Read adjoint solution
 
         cflmax = 0.d0   ! otherwise use previously heckpointed val
 
@@ -608,17 +625,13 @@ program amr2
     print *, 'Done reading data, starting computation ...  '
     print *, ' '
 
-
+    ! initialize timers before calling valout:
+    call system_clock(tick_clock_start, clock_rate)
+    call cpu_time(tick_cpu_start)
 
     call outtre (mstart,printout,nvar,naux)
     write(outunit,*) "  original total mass ..."
     call conck(1,nvar,naux,time,rest)
-
-    ! Timing
-    ! moved inside tick, so timers can be checkpoint for
-    ! possible restart
-    call system_clock(clock_start,clock_rate)
-
     if (output_t0) then
         call valout(1,lfine,time,nvar,naux)
     endif
@@ -637,9 +650,8 @@ program amr2
     ! Print out the fgmax files
     if (FG_num_fgrids > 0) call fgmax_finalize()
     
-    
-
-    call system_clock(clock_finish,clock_rate)
+    ! call system_clock to get clock_finish and count_max for debug output:
+    call system_clock(clock_finish,clock_rate,count_max)
     
     !output timing data
     open(timing_unit, file=timing_base_name//"txt", status='unknown',       &
@@ -649,7 +661,7 @@ program amr2
     format_string="('============================== Timing Data ==============================')"
     write(timing_unit,format_string)
     write(*,format_string)
-    
+
     write(*,*)
     write(timing_unit,*)
     
@@ -662,12 +674,12 @@ program amr2
     format_string="('Level           Wall Time (seconds)    CPU Time (seconds)   Total Cell Updates')"
     write(timing_unit,format_string)
     write(*,format_string)
+
+    ! level counters are cumulative after restart, so initialize sums to zero 
+    ! even after restart to sum up time over all levels
     ttotalcpu=0.d0
     ttotal=0
-
-    call system_clock(clock_finish,clock_rate)  ! just to get clock_rate
-    write(*,*) "clock_rate ",clock_rate
-
+      
     do level=1,mxnest
         format_string="(i3,'           ',1f15.3,'        ',1f15.3,'    ', e17.3)"
         write(timing_unit,format_string) level, &
@@ -726,13 +738,11 @@ program amr2
     !Total Time
     format_string="('Total time:   ',1f15.3,'        ',1f15.3,'  ')"
 
-!    write(*,format_string)  &
-!            real(clock_finish - clock_start,kind=8) / real(clock_rate,kind=8), &
-!            cpu_finish-cpu_start
     write(*,format_string) real(timeTick,kind=8)/real(clock_rate,kind=8), &
             timeTickCPU
     write(timing_unit,format_string) real(timeTick,kind=8)/real(clock_rate,kind=8), &
             timeTickCPU
+
     
     format_string="('Using',i3,' thread(s)')"
     write(timing_unit,format_string) maxthreads
@@ -757,10 +767,20 @@ program amr2
     write(timing_unit, "('Note: timings are also recorded for each output step')")
     write(timing_unit, "('      in the file timing.csv.')")
     
-    
-    !end of timing data
+
     write(*,*)
     write(timing_unit,*)
+
+    ! output clock_rate etc. useful in debugging or if negative time reported
+
+    format_string="('clock_rate = ',i10, ' per second,  count_max = ',i23)"
+    !write(*,format_string) clock_rate, count_max
+    write(timing_unit,format_string) clock_rate, count_max
+
+    format_string="('clock_start = ',i20, ',  clock_finish = ',i20)"
+    !write(*,format_string) tick_clock_start, clock_finish
+    write(timing_unit,format_string) tick_clock_start, clock_finish
+
     format_string="('=========================================================================')"
     write(timing_unit,format_string)
     write(*,format_string)

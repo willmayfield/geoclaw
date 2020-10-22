@@ -137,7 +137,7 @@ def plot_dZ_colors(x, y, dZ, axes=None, cmax_dZ=None, dZ_interval=None,
 
     y_ave = 0.5 * (y.min() + y.max())
     axes.set_aspect(1. / numpy.cos(y_ave * numpy.pi / 180.))
-    axes.ticklabel_format(format='plain', useOffset=False)
+    axes.ticklabel_format(style='plain', useOffset=False)
     axes.set_title('Seafloor deformation')
     for label in axes.get_xticklabels():
         label.set_rotation(20)
@@ -505,13 +505,13 @@ class DTopography(object):
         """
         Interpolate dZ to specified time t and return deformation.
         """
-        from matplotlib.mlab import find
+        from numpy import where
         if t <= self.times[0]:
             return self.dZ[0,:,:]
         elif t >= self.times[-1]:
             return self.dZ[-1,:,:]
         else:
-            n = max(find(numpy.array(self.times) <= t))
+            n = numpy.where(numpy.array(self.times) <= t)[0].max()
             t1 = self.times[n]
             t2 = self.times[n+1]
             dz = (t2-t)/(t2-t1) * self.dZ[n,:,:] + \
@@ -1003,7 +1003,7 @@ class Fault(object):
         else:
             slipax.set_title('Fault planes')
 
-        slipax.ticklabel_format(format='plain', useOffset=False)
+        slipax.ticklabel_format(style='plain', useOffset=False)
         for label in slipax.get_xticklabels():
             label.set_rotation(20)
         
