@@ -1,0 +1,2 @@
+a = randn(1,2000);
+csvwrite('random_nums',a);
